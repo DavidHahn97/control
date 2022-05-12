@@ -7,17 +7,19 @@ import rospy
 from dynamic_reconfigure.server import Server
 from control.cfg import PidJoystickControlConfig 
 
-from hippocampus_msgs.msg import ActuatorControls, DepthEKFStamped
+from hippocampus_msgs.msg import ActuatorControls, DepthEKFStamped, JoystickControlCommand
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from hippocampus_common.node import Node
 from mavros_msgs.srv import CommandLong, CommandBool
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Float64
+from sensor_msgs.msg import Imu
+
 
 
 import tf.transformations
 
-#from control.cfg import CarrotControlConfig
+# DON'T FORGET: set QGC params -> UUV_SKIP_CTRL and  UUV_INPUT_MODE
 
 class JoystickControlNode(Node):
     def __init__(self, name):
@@ -73,35 +75,33 @@ class JoystickControlNode(Node):
                                                       ActuatorControls,
                                                       queue_size=1)
 
+        self.joy_cmd_sub = rospy.Subscriber("joy_cmds", 
+                                            JoystickControlCommand, 
+                                            self.on_joy_cmds, 
+                                            queue_size=1)
 
-        self.thrust_cmd_sub = rospy.Subscriber("thrust_joy", 
-                                               Float64,
-                                               self.on_thrust,
-                                               queue_size=1)
+        # self.thrust_cmd_sub = rospy.Subscriber("thrust_joy", 
+        #                                        Float64,
+        #                                        self.on_thrust,
+        #                                        queue_size=1)
+        # 
+        # self.yaw_cmd_sub = rospy.Subscriber("yaw_joy", 
+        #                                        Float64,
+        #                                        self.on_yaw,
+        #                                        queue_size=1)
+        # 
+        # self.pitch_cmd_sub = rospy.Subscriber("pitch_joy", 
+        #                                        Float64,
+        #                                        self.on_pitch,
+        #                                        queue_size=1)
+        # 
+        # self.roll_cmd_sub = rospy.Subscriber("roll_joy", 
+        #                                        Float64,
+        #                                        self.on_roll,
+        #                                        queue_size=1)
         
-        self.yaw_cmd_sub = rospy.Subscriber("yaw_joy", 
-                                               Float64,
-                                               self.on_yaw,
-                                               queue_size=1)
-
-        self.pitch_cmd_sub = rospy.Subscriber("pitch_joy", 
-                                               Float64,
-                                               self.on_pitch,
-                                               queue_size=1)
         
-        self.roll_cmd_sub = rospy.Subscriber("roll_joy", 
-                                               Float64,
-                                               self.on_roll,
-                                               queue_size=1)
         # dirty quick hack --> switch ros-services for buttons
-        self.but_a_sub = rospy.Subscriber("but_a_joy", 
-                                               Float64,
-                                               self.on_but_a_joy,
-                                               queue_size=1)
-        self.but_b_sub = rospy.Subscriber("but_b_joy", 
-                                               Float64,
-                                               self.on_but_b_joy,
-                                               queue_size=1)
         self.but_x_sub = rospy.Subscriber("but_x_joy", 
                                                Float64,
                                                self.on_but_x_joy,
@@ -110,19 +110,14 @@ class JoystickControlNode(Node):
                                                Float64,
                                                self.on_but_y_joy,
                                                queue_size=1)
-        self.velocity_sub = rospy.Subscriber("mavros/local_position/velocity_body", 
-                                                TwistStamped,
-                                                self.on_velocity_body)
-        self.attitude_sub = rospy.Subscriber("mavros/local_position/pose",
-                                             PoseStamped, self.on_pose)
+
+        self.imu_sub = rospy.Subscriber("mavros/imu/data",
+                                             Imu, self.on_imu_data)
+        
 
         self.depth_sub = rospy.Subscriber("depth",
                                         DepthEKFStamped, 
                                         self.on_depth)
-        
-        # set-up services for arming/disarming via joystick
-        self.namespaces = ["/uuv02","/bluerov"] #self.get_param("~namespaces")
-        self.services = self.init_services()
 
     def on_pid_dyn_reconfigure(self, config, level):
         # the config parameters are provided as dictionary. The keys are the
@@ -146,62 +141,49 @@ class JoystickControlNode(Node):
             self.thrust_scaling = config["thrust_scaling"]
         return config
 
-    def on_pitch(self, msg):
+    def on_joy_cmds(self, msg):
+        # note joystick publishes only when values change
+        
         with self.data_lock:
-            self.pitch_cmd = msg.data
+            self.thrust_cmd = msg.thrust_x
+            self.roll_cmd = msg.roll
+            self.pitch_cmd = msg.pitch
+            self.yaw_cmd = msg.yaw
+        
 
-    def on_roll(self, msg):
-        with self.data_lock:
-            self.roll_cmd = msg.data
-    def on_yaw(self, msg):
-        with self.data_lock:
-            self.yaw_cmd = msg.data
+    # def on_pitch(self, msg):
+    #     with self.data_lock:
+    #         self.pitch_cmd = msg.data
 
-    def on_thrust(self, msg):
-        with self.data_lock:
-            self.thrust_cmd = msg.data
+    # def on_roll(self, msg):
+    #     with self.data_lock:
+    #         self.roll_cmd = msg.data
+    # def on_yaw(self, msg):
+    #     with self.data_lock:
+    #         self.yaw_cmd = msg.data
 
-    def on_pose(self, msg):
-        q = msg.pose.orientation
+    # def on_thrust(self, msg):
+    #     with self.data_lock:
+    #         self.thrust_cmd = msg.data
+
+    def on_imu_data(self, msg):
+
+        q = msg.orientation
+
         pose = tf.transformations.euler_from_quaternion([q.x, q.y, q.z, q.w])
         self.pitch = pose[1]
         self.roll = pose[0]
         self.yaw = pose[2]
 
-        # e = self.setpoint - pitch
-        # with self.data_lock:
-        #     u = self.update_controller(
-        #         error=e, now=rospy.get_time())
-
-        # msg = Float64(u)
-        # self.pitch_pub.publish(msg)
+        omega = msg.angular_velocity
+        with self.data_lock:
+            self.omega[:] = [omega.x, omega.y, omega.z]
     
     def on_depth(self, msg):
         self.depth = msg.depth
         self.depth_vel = msg.z_vel
 
 
-    def on_velocity_body(self, msg: TwistStamped):
-        omega = msg.twist.angular
-        with self.data_lock:
-            self.omega[:] = [omega.x, omega.y, omega.z]
-    
-    
-    def on_but_a_joy(self, msg):
-        button_a = msg.data
-        if button_a > 0:
-            self.call_arm()
-            return
-        else:
-            return
-    
-    def on_but_b_joy(self, msg):
-        button_b = msg.data
-        if button_b > 0:
-            self.call_disarm()
-            return
-        else:
-            return
     
     def on_but_x_joy(self, msg):
         button_x = msg.data
@@ -264,44 +246,6 @@ class JoystickControlNode(Node):
         u = [u_thrust, u_roll, u_pitch, u_yaw]
 
         return u
-
-    def init_services(self):
-        s = dict()
-        s["arm"] = {
-            0:
-            rospy.ServiceProxy(
-                "{}/mavros/cmd/arming".format(self.namespaces[0]), CommandBool),
-            1:
-            rospy.ServiceProxy(
-                "{}/mavros/cmd/arming".format(self.namespaces[1]), CommandBool)
-        }
-        s["command_long"] = {
-            0:
-            rospy.ServiceProxy("{}/mavros/cmd/command".format(self.namespaces[0]), CommandLong),
-            #rospy.ServiceProxy("/uuv02/mavros/cmd/command", CommandLong),
-            1:
-            rospy.ServiceProxy(
-                "{}/mavros/cmd/command".format(self.namespaces[1]), CommandLong)
-        }
-        return s
-    
-    def call_disarm(self, index=0):
-        try:
-            self.services["command_long"][index](command=400, param1=0, param2=21196)
-            rospy.logwarn("Success to call disarm service.")                                     
-        except rospy.ServiceException:
-            rospy.logerr("Failed to call disarm service.")
-
-    def call_arm(self, index=0):
-        try:
-            #r = self.services["command_long"][index](command=400, param1=1, param2=21196)
-            #rospy.logwarn("Success to call arm service.")            
-            rospy.logwarn("Joystick Arming temporary disabled for safety reasons.")            
-        except rospy.ServiceException:
-            rospy.logerr("Failed to call arm service.")
-        #else:
-        #    rospy.logwarn(r)
-
 
 
 
